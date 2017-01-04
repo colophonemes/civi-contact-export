@@ -1,0 +1,8 @@
+#Mapping values
+#Wed Jun 15 10:31:55 BST 2016
+donation_md5_hash=Donation_Hash__c
+donation_amount=Amount__c
+donation_currency=CurrencyIsoCode
+donation_timestamp=Date__c
+donation_contact_id=Account__r\:CiviCRM_ID__c
+donation_target=Charity__c

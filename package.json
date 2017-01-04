@@ -4,6 +4,7 @@
   "description": "Export contact data from a CiviCRM database",
   "main": "run.js",
   "scripts": {
+    "start": "node run",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "Sam Deere / Colophonemes <dev@colophonemes.com>",
@@ -14,6 +15,8 @@
     "chalk": "^1.1.3",
     "clone": "^1.0.2",
     "json2csv": "^3.3.0",
+    "levenshtein": "^1.0.5",
+    "md5": "^2.1.0",
     "merge": "^1.2.0",
     "mkdirp": "^0.5.1",
     "moment": "^2.13.0",

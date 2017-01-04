@@ -1,0 +1,11 @@
+#Mapping values
+#Tue May 10 20:01:04 BST 2016
+birth_date=PersonBirthdate
+id=CiviCRM_ID__c
+street_address=BillingStreet
+city=BillingCity
+first_name=FirstName
+phone=Phone
+email=PersonEmail
+postal_code=BillingPostalCode
+last_name=LastName

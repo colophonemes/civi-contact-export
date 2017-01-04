@@ -27,6 +27,9 @@ var unique = require('array-unique')
 var ProgressBar = require('progress');
 var merge = require('merge');
 var chalk = require('chalk');
+var md5 = require('md5');
+var Levenshtein = require('levenshtein');
+
 console.log('Loaded utility libs')
 
 // make the console pretty
@@ -129,6 +132,7 @@ var run = function(){
                     queue.add(
                         toCSV({data:data.csv[key]})
                         .then(function(csv){
+                            csv = csv.replace(/"null"/g,"\"\"");
                             var filename = key+'.csv';
                             return fs.writeFileAsync(path.join(__dirname,dataDir,filename),csv)
                             .then(function(){
@@ -189,7 +193,7 @@ function exit (){
 function execute(){
     var contacts = {};
 
-    return new Promise(function(resolve){
+    return new Promise(function get_custom_tables (resolve){
         // empty promise to kick things off
         // easier to run each SQL query in it's own .then() block
         console.log(alertMsg('Running SQL...'));
@@ -222,23 +226,31 @@ function execute(){
         })
 
     })
-    .then(function(custom_table_schema){
+    .then(function build_query (custom_table_schema){
         // select basic contact details
         var q = [];
-        q.push('SELECT '+fields(['contact','email','address','phone'])+','+custom_table_fields(custom_table_schema,false,'full')+' from civicrm_contact contact')
+        q.push('SELECT '+fields(['contact','email','address','phone']) )
+        // q.push(', GROUP_CONCAT(groups.title SEPARATOR \';\') as groups')
+        q.push(','+custom_table_fields(custom_table_schema,false,'full')+' ')
+        q.push('FROM civicrm_contact contact')
+        // contact details
         q.push('LEFT OUTER JOIN (SELECT '+fields('email')+' FROM `civicrm_email` email WHERE email.is_primary=1) email ON contact.id=email.contact_id')
         q.push('LEFT OUTER JOIN (SELECT '+fields('address')+' FROM `civicrm_address` address WHERE address.is_primary=1) address ON contact.id=address.contact_id')
         q.push('LEFT OUTER JOIN (SELECT '+fields('phone')+' FROM `civicrm_phone` phone WHERE phone.is_primary=1) phone ON contact.id=phone.contact_id')
-        
+        // groups
+        // q.push('LEFT OUTER JOIN (SELECT contact_id,title FROM `civicrm_group_contact` JOIN `civicrm_group` ON civicrm_group_contact.group_id = civicrm_group.id) groups ON contact.id=groups.contact_id')
         // add data from custom fields
         Object.keys(custom_table_schema).forEach(function(custom_table){
             var name = custom_table_name(custom_table);
             q.push('LEFT OUTER JOIN (SELECT '+custom_table_fields(custom_table_schema,custom_table,'as')+' FROM '+custom_table + ' '+name+') ' + name)
             q.push('ON contact.id='+name+'.'+name+'__entity_id')
         })
-        q.push('WHERE contact.contact_type="Individual"')
-        // q.push('AND contact.id=899')
-
+        // restrict selection
+        q.push('WHERE (')
+        q.push('contact.contact_type="Individual"')
+        q.push('AND (membershipstatus.membershipstatus__giving_what_we_can_member="1" OR membershipstatus.membershipstatus__trying_out_giving="1" OR membershipstatus.membershipstatus__my_giving_user="1")')
+        q.push(')')
+        // q.push('AND contact.id=375')
         return query(q)
     })
     //// This .then() block is very specific to my particular setup, but might be a useful
@@ -252,12 +264,29 @@ function execute(){
     ////            json: result
     ////        }
     ////
-    .then(function(result){
+    .then(function process_results (result){
         console.log(statusMsg('Unserializing dashboard data for '+result.length+' rows...'));
+        // console.log(result[Math.floor(Math.random()*result.length)])
         var contacts = [];
         var donations = [];
         var reportedIncome = [];
         var recurringDonations = [];
+        var charities = [];
+        var charityMergeCandidates = [];
+        var unknownCharities = [];
+        var donationCurrencyCodes = [];
+        var donationHashes = [];
+
+        // mappings from charity names to SF objects
+        var charitySFIDsMap = JSON.parse((fs.readFileSync(path.join(__dirname,'charity_salesforce_ids_and_names.json'))).toString())
+        var charitySFNames = charitySFIDsMap[1];
+        var charitySFIDs = charitySFIDsMap[0];
+        if(charitySFNames.length !== charitySFIDs.length){
+            throw new Error('Mismatched charity names and ID')
+        }
+
+
+        // var contactGroups = [];
         var bar = new ProgressBar('Unserialising: [:bar]',{ total: result.length });
         // split dashboard out from main contact
         for (var i = 0,j = result.length; i < j; i++) {
@@ -266,6 +295,25 @@ function execute(){
             contact.donations = null;
             contact.recurringDonations = null;
             contact.reportedIncome = null;
+            [
+                'birth_date',
+                'dates__joining_date',
+                "dates__left_date_former_members_",
+                "dates__end_date_try_out_givers_", 
+                "dates__start_date_trying_giving_",
+                "outreach__date_started",
+                "outreach__date_finished",
+                "outreach__next_contact_date",
+                "legacydata__date_old_pledge_form_submitted"
+            ].forEach(function(field){
+                var m = moment(contact[field])
+                if(m.isValid()){
+                    contact[field] = m.toISOString();
+                } else {
+                    contact[field] = null;
+                }
+            })
+            // dashboard
             var dashboardData = contact.donations__dashboard_data;
             if(dashboardData && dashboardData !== 'No data'){
                 try {
@@ -284,11 +332,33 @@ function execute(){
                 // split dashboard into donations, and identify by contact ID
                 if(dashboardData.donations && dashboardData.donations.length>0){
                     dashboardData.donations.forEach(function(donation){
+                        var charityName = trim(donation[1])
+                        // get charity name for master list
+                        if(charities.indexOf(charityName)===-1){
+                            charities.push(charityName)
+                        }
+                        // map charity name to SF ID
+                        var charityIDLookup = charitySFNames.indexOf(charityName);
+                        if(charityIDLookup===-1){
+                            if(unknownCharities.indexOf(charityName)===-1) unknownCharities.push(charityName)
+                            charityIDLookup = charitySFNames.indexOf('Unknown');
+                        }
+                        // get currency codes
+                        var donationCurrencyCode = donation[2];
+                        if(donationCurrencyCodes.indexOf(donationCurrencyCode)===-1) donationCurrencyCodes.push(donationCurrencyCode);
+                        // create a deterministic unique identifier for each donation
+                        var donationHash = contact.id+'-'+md5(JSON.stringify(donation))
+                        if(donationHashes.indexOf(donationHash)===-1){
+                            donationHashes.push(donationHash);
+                        } else {
+                            throw new Error (donationHash+' is not a unique hash')
+                        }
                         var d = {
+                            donation_md5_hash:   donationHash,
                             donation_contact_id: contact.id,
-                            donation_timestamp:  donation[0],
-                            donation_target:     donation[1], 
-                            donation_currency:   donation[2], 
+                            donation_timestamp:  moment(+donation[0]*1000).toISOString(),
+                            donation_target:     charitySFIDs[charityIDLookup], 
+                            donation_currency:   donationCurrencyCode, 
                             donation_amount:     donation[3], 
                         }
                         donations.push(d);
@@ -300,12 +370,29 @@ function execute(){
                 // split dashboard into income, and identify by contact ID
                 if(dashboardData.income){
                     Object.keys(dashboardData.income).forEach(function(year){
+                        // dates
+                        var m = moment([year,dashboardData.yearstartmonth+1,dashboardData.yearstartdate].join('-'),'YYYY-M-D');
+                        var startDate = m.toISOString();
+                        var endDate = m.add(1,'year').subtract(1,'day').toISOString();
+
+                        // pledge percentage
+                        var pledgePercentage = contact.pledgedamounts__pledge_percentage;
+                        if(!pledgePercentage){
+                            if(contact.membershipstatus__giving_what_we_can_member===1){
+                                pledgePercentage = 10;
+                            } else {
+                                pledgePercentage = 0;
+                            }
+                        }
+
                         var income = dashboardData.income[year];
                         var ri = {
                             income_contact_id: contact.id,
-                            income_year:  year,
+                            income_start_date:  startDate,
+                            income_end_date:  endDate,
                             income_currency:  income[0], 
                             income_amount:  income[1], 
+                            income_pledge_percentage:  pledgePercentage, 
                         };
                         reportedIncome.push(ri);
                         contact.reportedIncome = contact.reportedIncome || [];
@@ -316,13 +403,23 @@ function execute(){
                 // split out recurring donations, and identify by contact ID
                 if(dashboardData.recurringdonations && dashboardData.recurringdonations.length>0){
                     dashboardData.recurringdonations.forEach(function(donation){
+                        var charityName = trim(donation[4])
+                        if(charities.indexOf(charityName)===-1){
+                            charities.push(charityName)
+                        }
+                        var charityIDLookup = charitySFNames.indexOf(charityName);
+                        if(charityIDLookup===-1){
+                            // if(unknownCharities.indexOf(charityName)===-1) unknownCharities.push(charityName)
+                            // throw new Error ('Recurring Donation: Unknown charity "' + charityName +'"')
+                            charityIDLookup = charitySFNames.indexOf('Unknown');
+                        }
                         var rd = {
                             recurring_donation_contact_id: contact.id,
-                            recurring_donation_start_timestamp:  donation[0],
+                            recurring_donation_start_timestamp:  moment(+donation[0]*1000).toISOString(),
                             recurring_donation_end_timestamp:    donation[1], 
                             recurring_donation_frequency_unit:   donation[2], 
                             recurring_donation_frequency:        donation[3], 
-                            recurring_donation_target:           donation[4], 
+                            recurring_donation_target:           charitySFIDs[charityIDLookup], 
                             recurring_donation_currency:         donation[5], 
                             recurring_donation_amount:           donation[6], 
                         }
@@ -332,6 +429,61 @@ function execute(){
                     })
                 }
             }
+
+
+            /*// contact groups
+            var importantGroups = [
+                "Members",
+                "My Giving signups",
+                "Trying Giving"
+            ]
+            var obsoleteGroups = [
+                "1000 members party",
+                "Alison Woodman",
+                "AMF donor information email",
+                "Giving What We Can Oxford",
+                "Hidden Smart Group 16",
+                "Members who haven't logged in yet",
+                "Members without join dates",
+                "Members without pledge estimates",
+                "Non-members' newsletter",
+                "People contacted through outreach",
+                "Signups with real donations",
+                "Test Group (Jacob, Michelle and Steph)",
+                "Trying Giving people who haven't logged in yet",
+                "UK Members",
+                "Unconfirmed Members",
+                "Unconfirmed Trying Giving",
+                "US members",
+                "US Members email no.2",
+                "US members email no.3",
+                "Users citing 80,000 Hours",
+                "Wrong birth date",
+                "Wrong birth date (new CRM)",
+                "z members from old CRM",
+                "z try givers from old CRM",
+                "z try givers from old CRM who we forgot about"
+            ]
+
+            if(contact.groups){
+                contact.groups = contact.groups.split(';');
+                var contactImportantGroups = [];
+                var contactObsoleteGroups = [];
+                [importantGroups,obsoleteGroups].forEach(function(groupType,index){
+                    groupType.forEach(function(groupTitle){
+
+                    })
+                })
+                console.log()
+
+                contact.groups.forEach(function(groupTitle){
+                    console.log('title',groupTitle)
+                    contactGroups.push({
+                        'contact_group_contact_id' : contact.id,
+                        'contact_group_group_title' : groupTitle
+                    })
+                })
+            }*/
             // get rid of the dashboard data from the main array, including if it's null
             delete contact.donations__dashboard_data;
             // get rid of donations from the CSV data but not the JSON data
@@ -339,14 +491,51 @@ function execute(){
             delete contact.donations;
             delete contact.recurringDonations;
             delete contact.reportedIncome;
+            // delete contact.groups;
             contacts.push(contact)
         }
+        if(unknownCharities.length>0){
+            console.log(unknownCharities.length,'Unknown Charities:')
+            console.log(unknownCharities)
+        }
+        /*charities.sort();
+        console.log(statusMsg('Checking for similar charity names...'))
+        bar = new ProgressBar('Processing: [:bar]',{ total: charities.length });
+        var minDistance = 4;
+        charities.forEach(function(charityA,indexA){
+            charities.forEach(function(charityB,indexB){
+                if(indexA !== indexB && charityA.length>minDistance && charityB.length>minDistance && indexB>indexA){
+                    var comparison = new Levenshtein(charityA,charityB)
+                    if(comparison.distance<minDistance) charityMergeCandidates.push({
+                        charityA: charityA,
+                        charityB: charityB
+                    })
+                }
+            })
+            bar.tick();
+        })*/
+        donationCurrencyCodes.sort();
+        donationCurrencyCodes = donationCurrencyCodes.map(function(currency_code){
+            return {
+                'currency_code':currency_code,
+            }
+        });
+        charities = charities.map(function(charity){
+            return {
+                'charity_name':charity,
+                'charity_type': 'Unknown'
+            }
+        })
         return {
             csv : {
                 contacts: contacts,
                 donations: donations,
                 recurringDonations: recurringDonations,
-                reportedIncome: reportedIncome
+                reportedIncome: reportedIncome,
+                charities: charities,
+                charityMergeCandidates: charityMergeCandidates,
+                donationCurrencyCodes: donationCurrencyCodes,
+                // contactGroups: contactGroups
             },
             json: result
         }
@@ -356,8 +545,8 @@ function execute(){
 function query(queryStringArray,db){
     db = db || 'civicrm';
     var queryString = queryStringArray.join('\n')+';';
-    // console.log(alertMsg('SQL QUERY:'))
-    // console.log(statusMsg(queryString))
+    console.log(alertMsg('SQL QUERY:'))
+    console.log(statusMsg(queryString))
     if(db === 'civicrm'){
         return civicrm.query(queryString)
     } else if (db === 'drupal'){
