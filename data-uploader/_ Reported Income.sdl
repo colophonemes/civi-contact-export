@@ -1,8 +1,0 @@
-#Mapping values
-#Wed Jun 15 11:42:53 BST 2016
-income_amount=Amount__c
-income_contact_id=Account__r\:CiviCRM_ID__c
-income_pledge_percentage=Pledge_Percentage__c
-income_end_date=End_Date__c
-income_currency=CurrencyIsoCode
-income_start_date=Start_Date__c
