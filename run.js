@@ -239,6 +239,7 @@ function execute () {
     // restrict selection
     q.push('WHERE (')
     q.push('contact.contact_type="Individual"')
+    q.push('AND NOT contact.is_deleted')
     q.push('AND (membershipstatus.membershipstatus__giving_what_we_can_member="1" OR membershipstatus.membershipstatus__trying_out_giving="1" OR membershipstatus.membershipstatus__my_giving_user="1")')
     q.push(')')
     // q.push('AND contact.id=375')
